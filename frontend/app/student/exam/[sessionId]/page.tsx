@@ -9,6 +9,7 @@ import {
 import { useMonitoringWebSocket } from '@/hooks/useMonitoringWebSocket';
 import { useMonitoringStore, useAuthStore } from '@/store';
 import toast from 'react-hot-toast';
+import { useRouter } from 'next/navigation';
 
 interface MonitorStatus {
   label: string;
@@ -17,10 +18,12 @@ interface MonitorStatus {
 }
 
 export default function StudentExamPage({ params }: { params: { sessionId: string } }) {
+  const router = useRouter();
   const { user } = useAuthStore();
   const {
     suspicionScore, riskLevel, faceDetected, eyeContact,
     headPosition, phoneDetected, multiplePersons, alerts,
+    isTerminated, terminationReason,
     setMonitoringData, addAlert
   } = useMonitoringStore();
 
@@ -108,6 +111,25 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
     if (score >= 30) return 'bg-warning';
     return 'bg-success';
   };
+
+  if (isTerminated) {
+    return (
+      <div className="min-h-screen bg-background bg-mesh flex items-center justify-center p-6">
+        <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} className="glass-card p-8 text-center max-w-md w-full">
+          <div className="w-20 h-20 rounded-full bg-danger/15 border-2 border-danger/40 flex items-center justify-center mx-auto mb-4">
+            <XCircle className="w-10 h-10 text-danger" />
+          </div>
+          <h2 className="text-xl font-bold text-foreground mb-2">Exam Terminated</h2>
+          <p className="text-foreground-muted text-sm mb-6">
+            {terminationReason || "Your exam has been terminated by the proctoring system due to multiple policy violations."}
+          </p>
+          <button onClick={() => router.push('/student/dashboard')} className="btn-primary w-full justify-center py-3">
+            Return to Dashboard
+          </button>
+        </motion.div>
+      </div>
+    );
+  }
 
   if (!examStarted) {
     return (

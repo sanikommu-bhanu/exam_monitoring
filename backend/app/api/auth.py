@@ -5,6 +5,7 @@ from fastapi import APIRouter, HTTPException, Depends, status, UploadFile, File
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from datetime import datetime, timedelta
 from typing import Optional
+from pydantic import BaseModel
 import jwt
 import bcrypt
 import base64
@@ -73,6 +74,9 @@ async def register(user_data: UserCreate, session: AsyncSession = Depends(get_db
     existing = (await session.exec(select(User).where(User.email == user_data.email))).first()
     if existing:
         raise HTTPException(status_code=400, detail="Email already registered")
+        
+    if user_data.role == UserRole.STUDENT and not user_data.email.endswith("@saveetha.com"):
+        raise HTTPException(status_code=400, detail="Student email must end with @saveetha.com")
     
     if user_data.student_id:
         existing_student = (await session.exec(select(User).where(User.student_id == user_data.student_id))).first()
@@ -130,15 +134,18 @@ async def login(credentials: UserLogin, session: AsyncSession = Depends(get_db))
         )
     )
 
+class FaceImageBody(BaseModel):
+    image_base64: str
+
 @router.post("/register-face")
 async def register_face(
-    image_base64: str,
+    body: FaceImageBody,
     current_user: User = Depends(get_current_user),
     session: AsyncSession = Depends(get_db)
 ):
     """Register face encoding for a student"""
     success, embedding, result_msg = await face_auth_service.register_face(
-        current_user.id, image_base64
+        current_user.id, body.image_base64
     )
     
     if not success:
@@ -164,7 +171,7 @@ async def register_face(
 
 @router.post("/verify-face")
 async def verify_face(
-    image_base64: str,
+    body: FaceImageBody,
     current_user: User = Depends(get_current_user)
 ):
     """Verify identity at exam start"""
@@ -175,7 +182,7 @@ async def verify_face(
     
     verified, confidence, message = await face_auth_service.verify_identity(
         current_user.id,
-        image_base64,
+        body.image_base64,
         stored_embeddings
     )
     

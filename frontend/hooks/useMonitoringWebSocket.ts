@@ -5,7 +5,12 @@ import toast from 'react-hot-toast';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000';
 
-export function useMonitoringWebSocket(sessionId: string | null, isAdmin = false, adminId?: string) {
+export function useMonitoringWebSocket(
+  sessionId: string | null,
+  isAdmin = false,
+  adminId?: string,
+  onMessage?: (data: any) => void
+) {
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<NodeJS.Timeout | null>(null);
   const [isConnected, setIsConnected] = useState(false);
@@ -105,6 +110,7 @@ export function useMonitoringWebSocket(sessionId: string | null, isAdmin = false
 
       case 'exam_terminated':
         toast.error(`Exam terminated: ${data.reason}`, { duration: 10000 });
+        setMonitoringData({ isTerminated: true, terminationReason: data.reason });
         break;
 
       case 'connection_established':
@@ -115,7 +121,9 @@ export function useMonitoringWebSocket(sessionId: string | null, isAdmin = false
         // Admin receives student live updates
         break;
     }
-  }, [setMonitoringData, addAlert]);
+
+    onMessage?.(data);
+  }, [setMonitoringData, addAlert, onMessage]);
 
   const sendFrame = useCallback((frameBase64: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {

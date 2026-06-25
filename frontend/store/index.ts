@@ -70,6 +70,8 @@ interface MonitoringState {
   gazeDirection: string;
   alerts: Alert[];
   sessionId: string | null;
+  isTerminated: boolean;
+  terminationReason: string | null;
   setMonitoringData: (data: Partial<MonitoringState>) => void;
   addAlert: (alert: Alert) => void;
   setSession: (sessionId: string) => void;
@@ -96,6 +98,8 @@ export const useMonitoringStore = create<MonitoringState>((set) => ({
   gazeDirection: 'center',
   alerts: [],
   sessionId: null,
+  isTerminated: false,
+  terminationReason: null,
   
   setMonitoringData: (data) => set((state) => ({ ...state, ...data })),
   
@@ -117,6 +121,8 @@ export const useMonitoringStore = create<MonitoringState>((set) => ({
     gazeDirection: 'center',
     alerts: [],
     sessionId: null,
+    isTerminated: false,
+    terminationReason: null,
   }),
 }));
 

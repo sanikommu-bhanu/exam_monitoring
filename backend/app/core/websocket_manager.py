@@ -20,6 +20,8 @@ class ConnectionManager:
         self.admin_connections: Dict[str, WebSocket] = {}
         # Which sessions an admin is watching
         self.admin_watches: Dict[str, Set[str]] = {}
+        # Tracking auto warnings
+        self.auto_warnings: Dict[str, int] = {}
         
         # Import ML services lazily to avoid circular imports
         self._eye_service = None
@@ -152,6 +154,27 @@ class ConnectionManager:
                 asyncio.create_task(
                     self.save_session_update(session_id, response)
                 )
+                
+                # Auto-warning and termination logic
+                high_sev_alerts = [a for a in scoring_result.get("alerts", []) if a.get("severity") in ("high", "critical")]
+                if high_sev_alerts:
+                    if session_id not in self.auto_warnings:
+                        self.auto_warnings[session_id] = 0
+                    
+                    for alert in high_sev_alerts:
+                        self.auto_warnings[session_id] += 1
+                        warning_count = self.auto_warnings[session_id]
+                        
+                        if warning_count >= 3:
+                            await self.terminate_session(session_id, "Maximum warnings exceeded (3/3) due to critical violations.", "System")
+                            # Stop processing further alerts in this frame if terminated
+                            break
+                        else:
+                            await self.send_warning_to_student(
+                                session_id, 
+                                f"WARNING {warning_count}/3: {alert['message']}. Exam will be terminated after 3 warnings.", 
+                                "System"
+                            )
             
             elif frame_type == "tab_switch":
                 alert_data = {

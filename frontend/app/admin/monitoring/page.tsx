@@ -51,9 +51,76 @@ function StatusIndicator({ label, status, value }: { label: string; status: 'goo
 }
 
 export default function LiveMonitoringPage() {
+  const [sessions, setSessions] = useState(mockSessions);
   const [selectedSession, setSelectedSession] = useState(mockSessions[0]);
   const [warningMsg, setWarningMsg] = useState('');
-  const { isConnected, sendAdminCommand } = useMonitoringWebSocket(null, true, 'admin-1');
+  const { isConnected, sendAdminCommand } = useMonitoringWebSocket(null, true, 'admin-1', (data) => {
+    if (data.type === 'live_update' && data.session_id) {
+      setSessions((current) => {
+        const existingIndex = current.findIndex((session) => session.id === data.session_id);
+        const update = {
+          id: data.session_id,
+          studentId: data.data?.student_id ?? 'Unknown',
+          name: data.data?.student_name ?? 'Student',
+          exam: data.data?.exam_title ?? 'Exam',
+          score: data.data?.scoring?.suspicion_score ?? 0,
+          risk: data.data?.scoring?.risk_level ?? 'low',
+          time: data.data?.time_elapsed || '00:00:00',
+          faceDetected: data.data?.monitoring?.face_detected ?? true,
+          eyeContact: data.data?.monitoring?.eye_contact ?? true,
+          headPos: data.data?.monitoring?.head_position ?? 'Centered',
+          phone: data.data?.monitoring?.phone_detected ?? false,
+          multiPerson: data.data?.monitoring?.multiple_persons ?? false,
+        };
+
+        if (existingIndex !== -1) {
+          const updated = [...current];
+          updated[existingIndex] = { ...updated[existingIndex], ...update };
+          return updated;
+        }
+
+        return [update, ...current];
+      });
+    }
+  });
+
+  useEffect(() => {
+    const loadActiveSessions = async () => {
+      try {
+        const response = await monitoringAPI.getActiveSessions();
+        const active = response.data.map((session: any) => ({
+          id: session.id,
+          studentId: session.student_id,
+          name: session.student_name,
+          exam: session.exam_id || 'Exam',
+          score: session.suspicion_score ?? 0,
+          risk: session.risk_level ?? 'low',
+          time: session.time_elapsed_seconds
+            ? new Date(session.time_elapsed_seconds * 1000).toISOString().substr(11, 8)
+            : '00:00:00',
+          faceDetected: true,
+          eyeContact: true,
+          headPos: 'Centered',
+          phone: false,
+          multiPerson: false,
+        }));
+
+        setSessions(active.length ? active : mockSessions);
+        if (active.length) setSelectedSession(active[0]);
+      } catch (error) {
+        console.error('Failed to load active sessions', error);
+        setSessions(mockSessions);
+      }
+    };
+
+    loadActiveSessions();
+  }, []);
+
+  useEffect(() => {
+    if (!sessions.find((session) => session.id === selectedSession?.id) && sessions.length > 0) {
+      setSelectedSession(sessions[0]);
+    }
+  }, [sessions, selectedSession]);
 
   const getRiskColor = (score: number) => {
     if (score >= 80) return '#DC2626';
