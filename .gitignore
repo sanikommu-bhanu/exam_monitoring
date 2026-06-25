@@ -1,0 +1,88 @@
+# Backend
+backend/__pycache__/
+backend/.venv/
+backend/venv/
+backend/env/
+backend/*.db
+backend/*.sqlite3
+backend/uploads/*
+!backend/uploads/.gitkeep
+backend/models/
+backend/weights/
+backend/checkpoints/
+backend/runs/
+backend/logs/
+backend/.env
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/build/
+frontend/.next/
+frontend/.env
+frontend/.cache/
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+# Secrets
+.env
+.env.*
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# Virtual Environment
+venv/
+.venv/
+env/
+
+# Database
+*.db
+*.sqlite3
+
+# AI Models
+models/
+weights/
+checkpoints/
+*.pt
+*.pth
+*.onnx
+
+# Uploads & Recordings
+uploads/*
+!uploads/.gitkeep
+recordings/
+captures/
+exam_recordings/
+output/
+
+# Logs
+logs/
+*.log
+
+# Frontend
+node_modules/
+dist/
+build/
+
+# IDE
+.vscode/
+.idea/
+
+# OS Files
+.DS_Store
+Thumbs.db
+
+# Temporary
+*.tmp
+*.bak
