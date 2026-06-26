@@ -1,6 +1,6 @@
 'use client';
 import { useEffect, useRef, useCallback, useState } from 'react';
-import { useMonitoringStore } from '@/store';
+import { useMonitoringStore, useAuthStore } from '@/store';
 import toast from 'react-hot-toast';
 
 const WS_URL = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:8000';
@@ -14,52 +14,9 @@ export function useMonitoringWebSocket(
   const wsRef = useRef<WebSocket | null>(null);
   const reconnectRef = useRef<NodeJS.Timeout | null>(null);
   const [isConnected, setIsConnected] = useState(false);
-  const [reconnectCount, setReconnectCount] = useState(0);
+  const reconnectCountRef = useRef(0);
   const { setMonitoringData, addAlert } = useMonitoringStore();
-
-  const connect = useCallback(() => {
-    if (!sessionId && !adminId) return;
-
-    const url = isAdmin
-      ? `${WS_URL}/ws/admin/${adminId}`
-      : `${WS_URL}/ws/monitoring/${sessionId}`;
-
-    const ws = new WebSocket(url);
-    wsRef.current = ws;
-
-    ws.onopen = () => {
-      setIsConnected(true);
-      setReconnectCount(0);
-      console.log('[ProctorAI WS] Connected:', url);
-    };
-
-    ws.onmessage = (event) => {
-      try {
-        const data = JSON.parse(event.data);
-        handleMessage(data);
-      } catch (e) {
-        console.error('[ProctorAI WS] Parse error:', e);
-      }
-    };
-
-    ws.onclose = (event) => {
-      setIsConnected(false);
-      console.log('[ProctorAI WS] Disconnected:', event.code);
-
-      // Auto-reconnect (max 5 attempts)
-      if (reconnectCount < 5 && event.code !== 1000) {
-        const delay = Math.min(1000 * Math.pow(2, reconnectCount), 30000);
-        reconnectRef.current = setTimeout(() => {
-          setReconnectCount(c => c + 1);
-          connect();
-        }, delay);
-      }
-    };
-
-    ws.onerror = (error) => {
-      console.error('[ProctorAI WS] Error:', error);
-    };
-  }, [sessionId, adminId, isAdmin, reconnectCount]);
+  const accessToken = useAuthStore(state => state.accessToken);
 
   const handleMessage = useCallback((data: any) => {
     switch (data.type) {
@@ -125,6 +82,53 @@ export function useMonitoringWebSocket(
     onMessage?.(data);
   }, [setMonitoringData, addAlert, onMessage]);
 
+  const connect = useCallback(() => {
+    if ((!sessionId && !adminId) || !accessToken) return;
+
+    const baseUrl = isAdmin
+      ? `${WS_URL}/ws/admin/${adminId}`
+      : `${WS_URL}/ws/monitoring/${sessionId}`;
+
+    const url = `${baseUrl}?token=${accessToken}`;
+
+    const ws = new WebSocket(url);
+    wsRef.current = ws;
+
+    ws.onopen = () => {
+      setIsConnected(true);
+      reconnectCountRef.current = 0;
+      console.log('[ProctorAI WS] Connected:', url);
+    };
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        handleMessage(data);
+      } catch (e) {
+        console.error('[ProctorAI WS] Parse error:', e);
+      }
+    };
+
+    ws.onclose = (event) => {
+      setIsConnected(false);
+      console.log('[ProctorAI WS] Disconnected:', event.code);
+
+      // Auto-reconnect (max 5 attempts)
+      if (reconnectCountRef.current < 5 && event.code !== 1000) {
+        const delay = Math.min(1000 * Math.pow(2, reconnectCountRef.current), 30000);
+        reconnectRef.current = setTimeout(() => {
+          reconnectCountRef.current += 1;
+          connect();
+        }, delay);
+      }
+    };
+
+    ws.onerror = (error) => {
+      console.error('[ProctorAI WS] Error:', error);
+    };
+  }, [sessionId, adminId, isAdmin, accessToken, handleMessage]);
+
+
   const sendFrame = useCallback((frameBase64: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({
@@ -147,14 +151,16 @@ export function useMonitoringWebSocket(
     }
   }, []);
 
-  const sendTabSwitch = useCallback(() => {
+  const sendClientViolation = useCallback((violationType: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: 'tab_switch' }));
+      wsRef.current.send(JSON.stringify({ type: violationType }));
     }
   }, []);
 
   useEffect(() => {
-    connect();
+    if (accessToken) {
+      connect();
+    }
     
     // Heartbeat every 30s
     const heartbeatInterval = setInterval(sendHeartbeat, 30000);
@@ -164,13 +170,13 @@ export function useMonitoringWebSocket(
       if (reconnectRef.current) clearTimeout(reconnectRef.current);
       wsRef.current?.close(1000, 'Component unmounted');
     };
-  }, [sessionId]);
+  }, [sessionId, adminId, isAdmin, accessToken, connect, sendHeartbeat]);
 
   return {
     isConnected,
     sendFrame,
     sendAdminCommand,
-    sendTabSwitch,
-    reconnectCount,
+    sendClientViolation,
+    reconnectCount: reconnectCountRef.current,
   };
 }

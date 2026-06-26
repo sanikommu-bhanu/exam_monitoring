@@ -4,41 +4,49 @@ import { motion, AnimatePresence } from 'framer-motion';
 import Webcam from 'react-webcam';
 import {
   Shield, Eye, Camera, CheckCircle2, XCircle, AlertTriangle,
-  Clock, Activity, Monitor, Wifi, WifiOff, Info, ChevronRight
+  Clock, Activity, Monitor, Wifi, WifiOff, ChevronRight
 } from 'lucide-react';
 import { useMonitoringWebSocket } from '@/hooks/useMonitoringWebSocket';
 import { useMonitoringStore, useAuthStore } from '@/store';
 import toast from 'react-hot-toast';
 import { useRouter } from 'next/navigation';
 
-interface MonitorStatus {
-  label: string;
-  status: boolean | null;
-  detail: string;
-}
-
 export default function StudentExamPage({ params }: { params: { sessionId: string } }) {
   const router = useRouter();
-  const { user } = useAuthStore();
   const {
     suspicionScore, riskLevel, faceDetected, eyeContact,
     headPosition, phoneDetected, multiplePersons, alerts,
     isTerminated, terminationReason,
-    setMonitoringData, addAlert
   } = useMonitoringStore();
 
   const webcamRef = useRef<Webcam>(null);
   const captureIntervalRef = useRef<NodeJS.Timeout | null>(null);
-  const tabSwitchSentRef = useRef(false);
-
-  const sessionId = params.sessionId;
-  const { isConnected, sendFrame, sendTabSwitch } = useMonitoringWebSocket(sessionId);
-
   const [examStarted, setExamStarted] = useState(false);
   const [elapsed, setElapsed] = useState(0);
   const [examDuration] = useState(7200); // 2 hours
   const [fps, setFps] = useState(0);
   const fpsRef = useRef(0);
+  const [forceConnect, setForceConnect] = useState(false);
+
+  useEffect(() => {
+    const timer = setTimeout(() => setForceConnect(true), 30000);
+    return () => clearTimeout(timer);
+  }, []);
+  
+  // Warning Overlay State
+  const [showWarningOverlay, setShowWarningOverlay] = useState(false);
+  const [latestWarning, setLatestWarning] = useState('');
+
+  const sessionId = params.sessionId;
+  
+  const handleWebSocketMessage = useCallback((data: any) => {
+    if (data.type === 'admin_warning') {
+       setLatestWarning(data.message);
+       setShowWarningOverlay(true);
+    }
+  }, []);
+  
+  const { isConnected, sendFrame, sendClientViolation } = useMonitoringWebSocket(sessionId, false, undefined, handleWebSocketMessage);
 
   // Capture and send frame every 500ms
   const captureAndSend = useCallback(() => {
@@ -51,7 +59,7 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
   }, [isConnected, examStarted, sendFrame]);
 
   useEffect(() => {
-    if (examStarted && isConnected) {
+    if (examStarted && (isConnected || forceConnect)) {
       captureIntervalRef.current = setInterval(captureAndSend, 500);
       const fpsTimer = setInterval(() => {
         setFps(fpsRef.current * 2);
@@ -62,19 +70,66 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
         clearInterval(fpsTimer);
       };
     }
-  }, [examStarted, isConnected, captureAndSend]);
+  }, [examStarted, isConnected, forceConnect, captureAndSend]);
 
-  // Tab visibility detection
+  // Comprehensive Anti-Cheat Detection
   useEffect(() => {
+    if (!examStarted) return;
+
+    // 1. Tab Switch (Visibility)
     const handleVisibility = () => {
-      if (document.hidden && examStarted) {
-        sendTabSwitch();
-        toast.error('⚠️ Tab switch detected! This has been recorded.', { duration: 5000 });
+      if (document.hidden) {
+        sendClientViolation('tab_switch');
+        toast.error('⚠️ Tab switch detected! This is a violation.');
       }
     };
+    
+    // 2. Window Blur (Switching apps)
+    const handleBlur = () => {
+      sendClientViolation('window_switch');
+      toast.error('⚠️ Window focus lost! Please return to the exam immediately.');
+    };
+    
+    // 3. Fullscreen Exit
+    const handleFullscreenChange = () => {
+      if (!document.fullscreenElement) {
+        sendClientViolation('fullscreen_exit');
+        toast.error('⚠️ Exited fullscreen! This is a violation.');
+      }
+    };
+    
+    // 4. Prevent Copy/Paste/Context Menu
+    const preventAction = (e: Event) => e.preventDefault();
+    const handleKeyDown = (e: KeyboardEvent) => {
+        // Prevent F12, Ctrl+Shift+I, Ctrl+Shift+J, Ctrl+U, Ctrl+C, Ctrl+V
+        if (
+            e.key === 'F12' ||
+            (e.ctrlKey && e.shiftKey && (e.key === 'I' || e.key === 'J')) ||
+            (e.ctrlKey && (e.key === 'U' || e.key === 'c' || e.key === 'v'))
+        ) {
+            e.preventDefault();
+            toast.error('⚠️ Keyboard shortcut disabled.');
+        }
+    };
+
     document.addEventListener('visibilitychange', handleVisibility);
-    return () => document.removeEventListener('visibilitychange', handleVisibility);
-  }, [examStarted, sendTabSwitch]);
+    window.addEventListener('blur', handleBlur);
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    document.addEventListener('contextmenu', preventAction);
+    document.addEventListener('copy', preventAction);
+    document.addEventListener('paste', preventAction);
+    document.addEventListener('keydown', handleKeyDown);
+    
+    return () => {
+        document.removeEventListener('visibilitychange', handleVisibility);
+        window.removeEventListener('blur', handleBlur);
+        document.removeEventListener('fullscreenchange', handleFullscreenChange);
+        document.removeEventListener('contextmenu', preventAction);
+        document.removeEventListener('copy', preventAction);
+        document.removeEventListener('paste', preventAction);
+        document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [examStarted, sendClientViolation]);
 
   // Timer
   useEffect(() => {
@@ -83,6 +138,17 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
     return () => clearInterval(timer);
   }, [examStarted]);
 
+  const startExamSequence = async () => {
+      try {
+          if (document.documentElement.requestFullscreen) {
+              await document.documentElement.requestFullscreen();
+          }
+      } catch (e) {
+          console.warn('Fullscreen request failed', e);
+      }
+      setExamStarted(true);
+  };
+
   const formatTime = (seconds: number) => {
     const h = Math.floor(seconds / 3600);
     const m = Math.floor((seconds % 3600) / 60);
@@ -90,7 +156,7 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
     return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
   };
 
-  const monitoringStatuses: MonitorStatus[] = [
+  const monitoringStatuses = [
     { label: 'Face Detection', status: faceDetected, detail: faceDetected ? 'Active' : 'Not Detected' },
     { label: 'Eye Contact', status: eyeContact, detail: eyeContact ? 'Good' : 'Looking Away' },
     { label: 'Head Position', status: headPosition === 'centered', detail: headPosition === 'centered' ? 'Centered' : headPosition },
@@ -115,12 +181,12 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
   if (isTerminated) {
     return (
       <div className="min-h-screen bg-background bg-mesh flex items-center justify-center p-6">
-        <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} className="glass-card p-8 text-center max-w-md w-full">
+        <motion.div initial={{ opacity: 0, scale: 0.96 }} animate={{ opacity: 1, scale: 1 }} className="glass-card p-8 text-center max-w-md w-full border border-danger/50 shadow-glow-danger">
           <div className="w-20 h-20 rounded-full bg-danger/15 border-2 border-danger/40 flex items-center justify-center mx-auto mb-4">
             <XCircle className="w-10 h-10 text-danger" />
           </div>
-          <h2 className="text-xl font-bold text-foreground mb-2">Exam Terminated</h2>
-          <p className="text-foreground-muted text-sm mb-6">
+          <h2 className="text-2xl font-bold text-foreground mb-2">Exam Terminated</h2>
+          <p className="text-foreground-muted text-sm mb-6 bg-danger/10 p-4 rounded-xl border border-danger/20 text-danger">
             {terminationReason || "Your exam has been terminated by the proctoring system due to multiple policy violations."}
           </p>
           <button onClick={() => router.push('/student/dashboard')} className="btn-primary w-full justify-center py-3">
@@ -146,11 +212,10 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
               </div>
               <div>
                 <h1 className="text-xl font-bold text-foreground">ProctorAI Exam Monitor</h1>
-                <p className="text-foreground-muted text-sm">Data Structures Mid-Term Examination</p>
+                <p className="text-foreground-muted text-sm">Strict Monitored Environment</p>
               </div>
             </div>
 
-            {/* Webcam preview */}
             <div className="relative rounded-2xl overflow-hidden bg-black mb-6" style={{ aspectRatio: '16/9' }}>
               <Webcam
                 ref={webcamRef}
@@ -165,19 +230,13 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
                 <Camera className="w-3.5 h-3.5" />
                 Camera Active
               </div>
-
-              {/* Face guide box */}
-              <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
-                <div className="w-48 h-56 border-2 border-dashed border-emerald-400/50 rounded-lg" />
-              </div>
             </div>
 
-            {/* System checks */}
             <div className="grid grid-cols-3 gap-3 mb-6">
               {[
                 { icon: Camera, label: 'Camera', ok: true },
                 { icon: Monitor, label: 'Screen Share', ok: true },
-                { icon: Wifi, label: 'Connection', ok: isConnected },
+                { icon: Wifi, label: 'Connection', ok: isConnected || forceConnect },
               ].map((check) => (
                 <div key={check.label} className={`flex flex-col items-center gap-2 p-3 rounded-xl border ${
                   check.ok ? 'bg-success/5 border-success/20' : 'bg-danger/5 border-danger/20'
@@ -192,39 +251,27 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
               ))}
             </div>
 
-            {/* Rules */}
             <div className="bg-amber-500/5 border border-amber-500/20 rounded-xl p-4 mb-6">
               <div className="flex items-center gap-2 text-amber-400 text-sm font-semibold mb-2">
                 <AlertTriangle className="w-4 h-4" />
-                Exam Rules & Guidelines
+                Strict Anti-Cheat Environment Enabled
               </div>
               <ul className="space-y-1.5 text-xs text-foreground-muted">
-                {[
-                  'Keep your face visible in the camera at all times',
-                  'Do not look away from the screen for extended periods',
-                  'No mobile phones or other devices allowed',
-                  'Ensure only you are present in the camera frame',
-                  'Do not switch browser tabs during the exam',
-                  'Ensure good lighting and a clean background',
-                ].map((rule, i) => (
-                  <li key={i} className="flex items-start gap-2">
-                    <ChevronRight className="w-3 h-3 mt-0.5 flex-shrink-0 text-amber-400" />
-                    {rule}
-                  </li>
-                ))}
+                <li className="flex items-start gap-2"><ChevronRight className="w-3 h-3 mt-0.5 text-amber-400 flex-shrink-0" /> Exam will auto-terminate after exactly 3 warnings.</li>
+                <li className="flex items-start gap-2"><ChevronRight className="w-3 h-3 mt-0.5 text-amber-400 flex-shrink-0" /> Exiting fullscreen, switching tabs, or losing window focus counts as a severe violation.</li>
+                <li className="flex items-start gap-2"><ChevronRight className="w-3 h-3 mt-0.5 text-amber-400 flex-shrink-0" /> Using mobile phones or having multiple persons in the frame will trigger immediate warnings.</li>
+                <li className="flex items-start gap-2"><ChevronRight className="w-3 h-3 mt-0.5 text-amber-400 flex-shrink-0" /> Copy/paste and developer tools are disabled.</li>
               </ul>
             </div>
 
-            <div className="flex gap-3">
-              <button
-                onClick={() => setExamStarted(true)}
-                disabled={!isConnected}
-                className="flex-1 btn-primary justify-center py-3 text-base"
-              >
-                <Shield className="w-5 h-5" />
-                {isConnected ? 'Start Monitored Exam' : 'Connecting...'}
-              </button>
-            </div>
+            <button
+              onClick={startExamSequence}
+              disabled={!isConnected && !forceConnect}
+              className="w-full btn-primary justify-center py-3 text-base"
+            >
+              <Shield className="w-5 h-5 mr-2" />
+              {isConnected || forceConnect ? 'I Agree, Start Monitored Exam' : 'Connecting to Proctor...'}
+            </button>
           </div>
         </motion.div>
       </div>
@@ -232,8 +279,36 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
   }
 
   return (
-    <div className="min-h-screen bg-background flex flex-col">
-      {/* Monitoring bar */}
+    <div className="min-h-screen bg-background flex flex-col relative select-none">
+      {/* 3-Warning Popup Overlay */}
+      <AnimatePresence>
+          {showWarningOverlay && (
+              <motion.div 
+                  initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }}
+                  className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-6"
+              >
+                  <motion.div 
+                      initial={{ scale: 0.9, y: 20 }} animate={{ scale: 1, y: 0 }} exit={{ scale: 0.9, y: 20 }}
+                      className="glass-card p-8 max-w-lg w-full border border-warning/50 shadow-glow-warning text-center"
+                  >
+                      <div className="w-20 h-20 rounded-full bg-warning/20 border-2 border-warning flex items-center justify-center mx-auto mb-6 animate-pulse">
+                          <AlertTriangle className="w-10 h-10 text-warning" />
+                      </div>
+                      <h2 className="text-3xl font-bold text-foreground mb-4">Official Warning</h2>
+                      <div className="bg-warning/10 p-4 rounded-xl text-warning font-medium mb-8 text-lg border border-warning/30">
+                          {latestWarning}
+                      </div>
+                      <p className="text-foreground-muted mb-8 text-sm">
+                          You must acknowledge this warning to continue your exam. Repeated violations will result in automatic termination.
+                      </p>
+                      <button onClick={() => setShowWarningOverlay(false)} className="btn-primary w-full py-4 text-lg font-bold">
+                          I Understand & Acknowledge
+                      </button>
+                  </motion.div>
+              </motion.div>
+          )}
+      </AnimatePresence>
+
       <div className="h-12 bg-surface border-b border-border flex items-center px-4 gap-4 flex-shrink-0 z-30">
         <div className="flex items-center gap-2">
           <div className="w-7 h-7 rounded-lg bg-primary/20 flex items-center justify-center">
@@ -253,16 +328,15 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
 
         <div className="flex-1" />
 
-        {/* Real-time indicators */}
         <div className="flex items-center gap-3">
           <div className={`flex items-center gap-1.5 text-xs ${faceDetected ? 'text-success' : 'text-danger'}`}>
             <Eye className="w-3.5 h-3.5" />
             <span>{faceDetected ? 'Face OK' : 'No Face'}</span>
           </div>
           <div className="w-px h-4 bg-border" />
-          <div className={`flex items-center gap-1.5 text-xs ${isConnected ? 'text-success' : 'text-danger'}`}>
-            {isConnected ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
-            <span>{isConnected ? `${fps} fps` : 'Offline'}</span>
+          <div className={`flex items-center gap-1.5 text-xs ${isConnected || forceConnect ? 'text-success' : 'text-danger'}`}>
+            {isConnected || forceConnect ? <Wifi className="w-3.5 h-3.5" /> : <WifiOff className="w-3.5 h-3.5" />}
+            <span>{isConnected ? `${fps} fps` : forceConnect ? 'Bypassed' : 'Offline'}</span>
           </div>
           <div className="w-px h-4 bg-border" />
           <div className={`flex items-center gap-1.5 text-xs font-semibold ${getRiskColor(suspicionScore)}`}>
@@ -271,7 +345,6 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
           </div>
         </div>
 
-        {/* Mini webcam */}
         <div className="w-20 h-12 rounded-lg overflow-hidden border border-border bg-black relative">
           <Webcam
             ref={webcamRef}
@@ -281,19 +354,12 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
             className="w-full h-full object-cover"
             videoConstraints={{ width: 320, height: 240, facingMode: 'user' }}
           />
-          {/* Detection overlay */}
           <div className={`absolute inset-0 border-2 rounded-lg pointer-events-none ${
             faceDetected ? 'border-success/60' : 'border-danger/60'
           }`} />
-          <div className="absolute bottom-0.5 left-0.5 right-0.5 flex items-center justify-center">
-            <span className={`text-2xs font-bold px-1 rounded ${faceDetected ? 'text-success' : 'text-danger bg-danger/20'}`}>
-              {faceDetected ? '●' : 'NO FACE'}
-            </span>
-          </div>
         </div>
       </div>
 
-      {/* Alerts banner */}
       <AnimatePresence>
         {(phoneDetected || multiplePersons || !faceDetected) && (
           <motion.div
@@ -315,17 +381,14 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
         )}
       </AnimatePresence>
 
-      {/* Exam content area */}
       <div className="flex-1 flex overflow-hidden">
-        {/* Main exam content */}
         <div className="flex-1 overflow-y-auto p-6">
           <div className="max-w-3xl mx-auto">
             <div className="glass-card p-6 mb-4">
               <h2 className="text-lg font-bold text-foreground mb-1">Data Structures Mid-Term</h2>
-              <p className="text-foreground-muted text-sm">Time Remaining: <span className="font-mono text-primary font-bold">{formatTime(examDuration - elapsed)}</span> | Total Marks: 100</p>
+              <p className="text-foreground-muted text-sm">Time Remaining: <span className="font-mono text-primary font-bold">{formatTime(examDuration - elapsed)}</span></p>
             </div>
 
-            {/* Sample questions */}
             {[1, 2, 3].map((q) => (
               <div key={q} className="glass-card p-5 mb-4">
                 <div className="flex items-start gap-3 mb-3">
@@ -362,7 +425,6 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
           </div>
         </div>
 
-        {/* Right monitoring panel */}
         <div className="w-60 flex-shrink-0 bg-surface border-l border-border overflow-y-auto no-scrollbar p-4 space-y-4">
           <div>
             <div className="section-header">Monitoring Status</div>
@@ -385,7 +447,6 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
             </div>
           </div>
 
-          {/* Score */}
           <div>
             <div className="section-header">Risk Score</div>
             <div className="glass-card p-3 text-center">
@@ -404,25 +465,6 @@ export default function StudentExamPage({ params }: { params: { sessionId: strin
               </span>
             </div>
           </div>
-
-          {/* Recent alerts */}
-          {alerts.length > 0 && (
-            <div>
-              <div className="section-header">Recent Flags</div>
-              <div className="space-y-2">
-                {alerts.slice(0, 4).map((alert) => (
-                  <div key={alert.id} className={`text-xs p-2 rounded-lg border ${
-                    alert.severity === 'high' ? 'bg-danger/8 border-danger/20 text-danger' :
-                    alert.severity === 'medium' ? 'bg-warning/8 border-warning/20 text-warning' :
-                    'bg-info/8 border-info/20 text-info'
-                  }`}>
-                    <div className="font-medium">{alert.type.replace(/_/g, ' ')}</div>
-                    <div className="opacity-70 mt-0.5">{new Date(alert.timestamp).toLocaleTimeString()}</div>
-                  </div>
-                ))}
-              </div>
-            </div>
-          )}
         </div>
       </div>
     </div>

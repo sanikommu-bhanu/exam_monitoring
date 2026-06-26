@@ -1,23 +1,6 @@
 version: '3.9'
 
 services:
-  # MongoDB
-  mongodb:
-    image: mongo:7.0
-    container_name: proctorAI-mongo
-    restart: unless-stopped
-    ports:
-      - "27017:27017"
-    environment:
-      MONGO_INITDB_ROOT_USERNAME: proctorAI
-      MONGO_INITDB_ROOT_PASSWORD: proctorAI_secret_2024
-      MONGO_INITDB_DATABASE: proctorAI
-    volumes:
-      - mongo_data:/data/db
-    networks:
-      - proctorAI-network
-
-  # Redis
   redis:
     image: redis:7.2-alpine
     container_name: proctorAI-redis
@@ -30,7 +13,6 @@ services:
     networks:
       - proctorAI-network
 
-  # Backend (FastAPI)
   backend:
     build:
       context: ./backend
@@ -40,21 +22,21 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - MONGODB_URL=mongodb://proctorAI:proctorAI_secret_2024@mongodb:27017/proctorAI?authSource=admin
+      - SQLITE_DB_URL=sqlite+aiosqlite:///./proctorai.db
       - REDIS_URL=redis://redis:6379
       - SECRET_KEY=your-super-secret-key-change-in-production-min-32-chars
       - DEBUG=false
+      - ADMIN_EMAIL=admin@saveetha.com
+      - ADMIN_PASSWORD=Admin@123
+      - SAVEETHA_DOMAIN=saveetha.com
     volumes:
       - ./backend:/app
       - backend_uploads:/app/uploads
-      - ml_models:/app/ml/models
     depends_on:
-      - mongodb
       - redis
     networks:
       - proctorAI-network
 
-  # Frontend (Next.js)
   frontend:
     build:
       context: ./frontend
@@ -71,7 +53,6 @@ services:
     networks:
       - proctorAI-network
 
-  # Nginx reverse proxy
   nginx:
     image: nginx:alpine
     container_name: proctorAI-nginx
@@ -89,10 +70,8 @@ services:
       - proctorAI-network
 
 volumes:
-  mongo_data:
   redis_data:
   backend_uploads:
-  ml_models:
 
 networks:
   proctorAI-network:

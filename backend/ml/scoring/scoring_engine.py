@@ -76,6 +76,10 @@ class SuspicionScoringEngine:
             "looking_away_since": None,
             "phone_present_since": None,
             "multiple_persons_since": None,
+            "identity_mismatch_since": None,
+            "phone_alert_sent": False,
+            "persons_alert_sent": False,
+            "identity_alert_sent": False,
             
             # Cumulative stats
             "total_looking_away_events": 0,
@@ -116,6 +120,7 @@ class SuspicionScoringEngine:
         multiple_persons = frame_data.get("multiple_persons", False)
         phone_detected = frame_data.get("phone_detected", False)
         head_pose_violation = frame_data.get("head_pose_violation", False)
+        identity_verified = frame_data.get("identity_verified", True)
         
         # --- Face Detection ---
         if not face_detected:
@@ -127,14 +132,14 @@ class SuspicionScoringEngine:
                 state["total_face_absent_events"] += 1
             else:
                 absent_duration = (now - state["face_absent_since"]).total_seconds()
-                if absent_duration > 3:
+                if absent_duration > 2:
                     score_delta += self.weights.FACE_ABSENT_SUSTAINED * 0.1  # per frame
-                    if absent_duration > 3 and absent_duration < 3.5:
+                    if absent_duration > 2 and absent_duration < 2.5:
                         alerts.append({
                             "type": "face_not_detected",
                             "severity": "high",
                             "duration": absent_duration,
-                            "message": "Face not detected for over 3 seconds"
+                            "message": "Face not detected for over 2 seconds"
                         })
         else:
             if state["face_absent_since"] is not None:
@@ -150,9 +155,9 @@ class SuspicionScoringEngine:
                 state["total_looking_away_events"] += 1
             else:
                 away_duration = (now - state["looking_away_since"]).total_seconds()
-                if away_duration > 5:
+                if away_duration > 2:
                     score_delta += self.weights.LOOKING_AWAY_SUSTAINED * 0.1
-                    if away_duration > 5 and away_duration < 5.5:
+                    if away_duration > 2 and away_duration < 2.5:
                         alerts.append({
                             "type": "looking_away",
                             "severity": "medium",
@@ -171,13 +176,18 @@ class SuspicionScoringEngine:
             if state["multiple_persons_since"] is None:
                 state["multiple_persons_since"] = now
                 score_delta += self.weights.MULTIPLE_PERSONS
-                alerts.append({
-                    "type": "multiple_persons",
-                    "severity": "high",
-                    "message": "Multiple persons detected in frame"
-                })
+            else:
+                persons_duration = (now - state["multiple_persons_since"]).total_seconds()
+                if persons_duration >= 0.5 and not state.get("persons_alert_sent"):
+                    alerts.append({
+                        "type": "multiple_persons",
+                        "severity": "high",
+                        "message": "Multiple persons detected in frame"
+                    })
+                    state["persons_alert_sent"] = True
         else:
             state["multiple_persons_since"] = None
+            state["persons_alert_sent"] = False
         
         # --- Phone Detection ---
         if phone_detected:
@@ -187,17 +197,40 @@ class SuspicionScoringEngine:
             if state["phone_present_since"] is None:
                 state["phone_present_since"] = now
                 score_delta += self.weights.PHONE_DETECTED
-                alerts.append({
-                    "type": "phone_detected",
-                    "severity": "high",
-                    "message": "Mobile phone detected in frame"
-                })
             else:
                 phone_duration = (now - state["phone_present_since"]).total_seconds()
-                if phone_duration > 5:
+                if phone_duration >= 0.5 and not state.get("phone_alert_sent"):
+                    alerts.append({
+                        "type": "phone_detected",
+                        "severity": "high",
+                        "message": "Mobile phone detected in frame"
+                    })
+                    state["phone_alert_sent"] = True
+                if phone_duration > 0.5:
                     score_delta += self.weights.PHONE_DETECTED * 0.05
         else:
             state["phone_present_since"] = None
+            state["phone_alert_sent"] = False
+        
+        # --- Identity Mismatch ---
+        if not identity_verified and face_detected:
+            violations_this_frame.append("identity_mismatch")
+            
+            if state.get("identity_mismatch_since") is None:
+                state["identity_mismatch_since"] = now
+                score_delta += self.weights.IDENTITY_MISMATCH
+            else:
+                mismatch_duration = (now - state["identity_mismatch_since"]).total_seconds()
+                if mismatch_duration >= 2 and not state.get("identity_alert_sent"):
+                    alerts.append({
+                        "type": "identity_mismatch",
+                        "severity": "high",
+                        "message": "Unrecognized person detected for 2 seconds. Only the registered student is allowed."
+                    })
+                    state["identity_alert_sent"] = True
+        else:
+            state["identity_mismatch_since"] = None
+            state["identity_alert_sent"] = False
         
         # --- Head Pose ---
         if head_pose_violation and face_detected:

@@ -26,17 +26,15 @@ class ObjectDetectionService:
             if model_path.exists():
                 self.model = YOLO(str(model_path))
             else:
-                # Download automatically
+                # Download automatically to current working directory
                 self.model = YOLO("yolov8n.pt")
-                model_path.parent.mkdir(parents=True, exist_ok=True)
-                self.model.export(format="onnx")
                 
             logger.info("YOLOv8 model loaded successfully")
         except Exception as e:
             logger.error(f"Failed to load YOLOv8: {e}")
             self.model = None
         
-        self.confidence_threshold = 0.5
+        self.confidence_threshold = 0.15  # Reduced from 0.5 for better webcam detection
         self.person_overlap_threshold = 0.3
     
     def decode_base64_image(self, base64_str: str) -> np.ndarray:

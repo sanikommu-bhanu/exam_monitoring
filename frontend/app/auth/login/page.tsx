@@ -28,7 +28,13 @@ export default function LoginPage() {
       toast.success(`Welcome back, ${data.user.full_name}!`);
       
       if (data.user.role === 'student') {
-        router.push('/student/dashboard');
+        if (!data.user.is_profile_complete) {
+          router.push('/student/profile');
+        } else if (!data.user.face_verified) {
+          router.push('/student/register-face');
+        } else {
+          router.push('/student/dashboard');
+        }
       } else {
         router.push('/admin/dashboard');
       }
@@ -267,7 +273,7 @@ export default function LoginPage() {
           <p className="mt-6 text-center text-sm text-foreground-muted">
             Don&apos;t have an account?{' '}
             <Link href="/auth/register" className="text-primary hover:underline font-medium">
-              Contact Admin
+              Register here
             </Link>
           </p>
         </motion.div>

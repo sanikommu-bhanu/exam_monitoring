@@ -26,9 +26,9 @@ if not existing:
     cursor.execute(
         'INSERT INTO exams (id,exam_code,title,subject,description,start_time,end_time,duration_minutes,'
         'allowed_students,created_by,enable_face_detection,enable_eye_tracking,enable_head_pose,'
-        'enable_phone_detection,enable_multiple_person_detection,auto_terminate_on_high_risk,'
+        'enable_phone_detection,enable_multiple_person_detection,auto_terminate_on_high_risk,max_warnings,'
         'status,total_enrolled,total_appeared,created_at,updated_at) '
-        'VALUES (?,?,?,?,?,?,?,?,?,?,1,1,1,1,1,0,?,1,0,?,?)',
+        'VALUES (?,?,?,?,?,?,?,?,?,?,1,1,1,1,1,0,3,?,1,0,?,?)',
         (exam_id, 'CS101-LIVE', 'Data Structures - Live Test', 'Computer Science',
          'Live proctoring demo exam', start, end, 180,
          json.dumps(['STU999']),

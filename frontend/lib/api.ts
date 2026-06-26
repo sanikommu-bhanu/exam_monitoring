@@ -72,6 +72,9 @@ export const authAPI = {
   
   getMe: () =>
     api.get('/auth/me'),
+    
+  updateProfile: (data: any) =>
+    api.patch('/auth/me/profile', data),
 };
 
 // Exam APIs

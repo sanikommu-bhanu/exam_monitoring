@@ -5,7 +5,7 @@ Handles real-time bidirectional communication between students and admin
 import asyncio
 import json
 import logging
-from typing import Dict, List, Set, Optional
+from typing import Dict, List, Set, Optional, Any
 from fastapi import WebSocket
 from datetime import datetime
 import base64
@@ -23,10 +23,16 @@ class ConnectionManager:
         # Tracking auto warnings
         self.auto_warnings: Dict[str, int] = {}
         
+        # Identity verification tracking
+        self.student_encodings: Dict[str, list] = {}
+        self.last_verified: Dict[str, datetime] = {}
+        self.session_student_ids: Dict[str, str] = {}
+        self.session_identity_status: Dict[str, bool] = {}
+        
         # Import ML services lazily to avoid circular imports
-        self._eye_service = None
-        self._object_service = None
-        self._scoring_engine = None
+        self._eye_service: Any = None
+        self._object_service: Any = None
+        self._scoring_engine: Any = None
     
     def _get_services(self):
         if self._eye_service is None:
@@ -42,6 +48,26 @@ class ConnectionManager:
         self.student_connections[session_id] = websocket
         logger.info(f"Student session {session_id} connected")
         
+        # Fetch student encodings from DB
+        try:
+            from models.exam import ExamSession
+            from models.user import User
+            from app.db.database import engine
+            from sqlmodel.ext.asyncio.session import AsyncSession
+            from sqlmodel import select
+            
+            async with AsyncSession(engine) as db_session:
+                exam_session = (await db_session.exec(select(ExamSession).where(ExamSession.id == session_id))).first()
+                if exam_session:
+                    student_id = exam_session.student_id
+                    self.session_student_ids[session_id] = student_id
+                    user = (await db_session.exec(select(User).where(User.id == student_id))).first()
+                    if user and user.face_encodings:
+                        embeddings = [enc.get("encoding") for enc in user.face_encodings if "encoding" in enc]
+                        self.student_encodings[session_id] = embeddings
+        except Exception as e:
+            logger.error(f"Failed to fetch encodings for session {session_id}: {e}")
+            
         await websocket.send_json({
             "type": "connection_established",
             "session_id": session_id,
@@ -89,7 +115,7 @@ class ConnectionManager:
                 if not frame_base64:
                     return
                 
-                # Parallel analysis
+                # Parallel analysis using ThreadPool via run_in_executor to avoid blocking
                 eye_task = asyncio.get_event_loop().run_in_executor(
                     None, self._eye_service.analyze_frame, frame_base64
                 )
@@ -99,10 +125,30 @@ class ConnectionManager:
                 
                 eye_results, obj_results = await asyncio.gather(eye_task, obj_task)
                 
+                # Periodically verify identity (every 5 seconds)
+                now = datetime.utcnow()
+                last_ver = self.last_verified.get(session_id)
+                current_id_status = self.session_identity_status.get(session_id, True)
+                
+                if eye_results.get("face_detected", False):
+                    if last_ver is None or (now - last_ver).total_seconds() > 5:
+                        embeddings = self.student_encodings.get(session_id)
+                        student_id = self.session_student_ids.get(session_id)
+                        if embeddings and student_id:
+                            try:
+                                from ml.face_auth.face_service import face_auth_service
+                                is_verified, score, msg = await face_auth_service.verify_identity(student_id, frame_base64, embeddings)
+                                current_id_status = is_verified
+                                self.session_identity_status[session_id] = is_verified
+                                self.last_verified[session_id] = now
+                            except Exception as e:
+                                logger.error(f"Identity verification failed for session {session_id}: {e}")
+                
                 # Merge results
                 frame_data = {
                     **eye_results,
                     **obj_results,
+                    "identity_verified": current_id_status,
                 }
                 
                 # Calculate suspicion score
@@ -150,45 +196,68 @@ class ConnectionManager:
                     "data": response
                 })
                 
-                # Save to DB asynchronously (fire and forget)
-                asyncio.create_task(
-                    self.save_session_update(session_id, response)
-                )
-                
-                # Auto-warning and termination logic
+                # Auto-warning and termination logic (exactly 3 warnings)
                 high_sev_alerts = [a for a in scoring_result.get("alerts", []) if a.get("severity") in ("high", "critical")]
+                warning_issued_this_frame = False
+                
                 if high_sev_alerts:
                     if session_id not in self.auto_warnings:
+                        # Will sync this properly in save_session_update if missed
                         self.auto_warnings[session_id] = 0
                     
-                    for alert in high_sev_alerts:
-                        self.auto_warnings[session_id] += 1
-                        warning_count = self.auto_warnings[session_id]
-                        
-                        if warning_count >= 3:
-                            await self.terminate_session(session_id, "Maximum warnings exceeded (3/3) due to critical violations.", "System")
-                            # Stop processing further alerts in this frame if terminated
-                            break
-                        else:
-                            await self.send_warning_to_student(
-                                session_id, 
-                                f"WARNING {warning_count}/3: {alert['message']}. Exam will be terminated after 3 warnings.", 
-                                "System"
-                            )
-            
-            elif frame_type == "tab_switch":
+                    # Group alerts per frame to trigger at most one warning per frame cycle
+                    self.auto_warnings[session_id] += 1
+                    warning_count = self.auto_warnings[session_id]
+                    warning_issued_this_frame = True
+                    
+                    primary_alert = high_sev_alerts[0]
+                    response["warning_count"] = warning_count
+                    
+                    if warning_count > 3:
+                        await self.terminate_session(session_id, "Maximum warnings exceeded. Exam auto-terminated.", "System")
+                    else:
+                        await self.send_warning_to_student(
+                            session_id, 
+                            f"WARNING {warning_count}/3: {primary_alert['message']}. Exam will be terminated after 3 warnings.", 
+                            "System"
+                        )
+                
+                # Save to DB asynchronously (fire and forget)
+                asyncio.create_task(
+                    self.save_session_update(session_id, response, high_sev_alerts if warning_issued_this_frame else None)
+                )
+                
+            elif frame_type == "tab_switch" or frame_type == "fullscreen_exit" or frame_type == "window_switch":
                 alert_data = {
                     "type": "alert",
                     "session_id": session_id,
                     "alert": {
-                        "type": "tab_switch",
-                        "severity": "medium",
-                        "message": "Student switched browser tab"
+                        "type": frame_type,
+                        "severity": "high",
+                        "message": f"Student performed {frame_type.replace('_', ' ')}"
                     },
                     "timestamp": datetime.utcnow().isoformat()
                 }
                 await self.broadcast_to_watching_admins(session_id, alert_data)
-            
+                
+                if session_id not in self.auto_warnings:
+                    self.auto_warnings[session_id] = 0
+                self.auto_warnings[session_id] += 1
+                warning_count = self.auto_warnings[session_id]
+                
+                if warning_count > 3:
+                    await self.terminate_session(session_id, "Maximum warnings exceeded. Exam auto-terminated.", "System")
+                else:
+                    await self.send_warning_to_student(
+                        session_id, 
+                        f"WARNING {warning_count}/3: Window/Tab violation. Exam will be terminated after 3 warnings.", 
+                        "System"
+                    )
+                
+                asyncio.create_task(
+                    self.save_session_update(session_id, alert_data, [alert_data["alert"]])
+                )
+
             elif frame_type == "heartbeat":
                 await websocket.send_json({
                     "type": "heartbeat_ack",
@@ -209,23 +278,25 @@ class ConnectionManager:
         
         if command == "watch_session":
             session_id = data.get("session_id")
-            if admin_id in self.admin_watches:
+            if session_id and admin_id in self.admin_watches:
                 self.admin_watches[admin_id].add(session_id)
         
         elif command == "unwatch_session":
             session_id = data.get("session_id")
-            if admin_id in self.admin_watches and session_id in self.admin_watches[admin_id]:
+            if session_id and admin_id in self.admin_watches and session_id in self.admin_watches[admin_id]:
                 self.admin_watches[admin_id].remove(session_id)
         
         elif command == "send_warning":
             session_id = data.get("session_id")
-            message = data.get("message", "Please focus on your exam")
-            await self.send_warning_to_student(session_id, message, admin_id)
+            if session_id:
+                message = data.get("message", "Please focus on your exam")
+                await self.send_warning_to_student(session_id, message, admin_id)
         
         elif command == "end_exam":
             session_id = data.get("session_id")
-            reason = data.get("reason", "Terminated by proctor")
-            await self.terminate_session(session_id, reason, admin_id)
+            if session_id:
+                reason = data.get("reason", "Terminated by proctor")
+                await self.terminate_session(session_id, reason, admin_id)
         
         elif command == "get_active_sessions":
             admin_ws = self.admin_connections.get(admin_id)
@@ -235,6 +306,25 @@ class ConnectionManager:
                     "sessions": list(self.student_connections.keys())
                 })
     
+    async def broadcast_to_watching_admins(self, session_id: str, message: dict):
+        """Broadcast a message to all admins who are watching the given session."""
+        for admin_id, watching_sessions in self.admin_watches.items():
+            if session_id in watching_sessions:
+                admin_ws = self.admin_connections.get(admin_id)
+                if admin_ws:
+                    try:
+                        await admin_ws.send_json(message)
+                    except Exception as e:
+                        logger.error(f"Failed to send to admin {admin_id}: {e}")
+
+    async def broadcast_to_admins(self, message: dict):
+        """Broadcast a message to all connected admins."""
+        for admin_id, admin_ws in self.admin_connections.items():
+            try:
+                await admin_ws.send_json(message)
+            except Exception as e:
+                logger.error(f"Failed to send to admin {admin_id}: {e}")
+
     async def send_warning_to_student(self, session_id: str, message: str, admin_id: str):
         """Send warning message to a specific student"""
         student_ws = self.student_connections.get(session_id)
@@ -255,34 +345,38 @@ class ConnectionManager:
                 "terminated_by": admin_id,
                 "timestamp": datetime.utcnow().isoformat()
             })
-    
-    async def broadcast_to_admins(self, message: dict):
-        """Broadcast to all connected admins"""
-        disconnected = []
-        for admin_id, ws in self.admin_connections.items():
+            # Disconnect the student gracefully
             try:
-                await ws.send_json(message)
+                await asyncio.sleep(0.5)
+                await student_ws.close()
             except Exception:
-                disconnected.append(admin_id)
-        
-        for admin_id in disconnected:
-            self.disconnect_admin(None, admin_id)
-    
-    async def broadcast_to_watching_admins(self, session_id: str, message: dict):
-        """Broadcast to admins watching a specific session"""
-        for admin_id, watched_sessions in self.admin_watches.items():
-            if session_id in watched_sessions or len(watched_sessions) == 0:
-                admin_ws = self.admin_connections.get(admin_id)
-                if admin_ws:
-                    try:
-                        await admin_ws.send_json(message)
-                    except Exception:
-                        pass
-    
-    async def save_session_update(self, session_id: str, response: dict):
-        """Save session data to SQLite"""
+                pass
+            self.disconnect(student_ws, session_id)
+            
+            # Save terminated status to DB
+            try:
+                from models.exam import ExamSession, SessionStatus
+                from app.db.database import engine
+                from sqlmodel.ext.asyncio.session import AsyncSession
+                from sqlmodel import select
+                async with AsyncSession(engine) as db_session:
+                    session_obj = (await db_session.exec(select(ExamSession).where(ExamSession.id == session_id))).first()
+                    if session_obj:
+                        session_obj.status = SessionStatus.TERMINATED
+                        session_obj.terminated_reason = reason
+                        if admin_id != "System":
+                            session_obj.terminated_by_admin = True
+                        session_obj.end_time = datetime.utcnow()
+                        db_session.add(session_obj)
+                        await db_session.commit()
+            except Exception as e:
+                logger.error(f"Failed to save terminated status: {e}")
+
+    async def save_session_update(self, session_id: str, response: dict, alerts: Optional[List[dict]] = None):
+        """Save session data to SQLite and track violations"""
         try:
             from models.exam import ExamSession
+            from models.violation import Violation, ViolationSeverity
             from app.db.database import engine
             from sqlmodel.ext.asyncio.session import AsyncSession
             from sqlmodel import select
@@ -291,11 +385,31 @@ class ConnectionManager:
                 session_obj = (await db_session.exec(select(ExamSession).where(ExamSession.id == session_id))).first()
                 if session_obj:
                     scoring = response.get("scoring", {})
-                    session_obj.suspicion_score = scoring.get("suspicion_score", session_obj.suspicion_score)
-                    session_obj.risk_level = scoring.get("risk_level", session_obj.risk_level)
-                    from datetime import datetime
+                    if scoring:
+                        session_obj.suspicion_score = scoring.get("suspicion_score", session_obj.suspicion_score)
+                        session_obj.risk_level = scoring.get("risk_level", session_obj.risk_level)
+                    
+                    if "warning_count" in response:
+                        session_obj.warning_count = response["warning_count"]
+                    elif session_id in self.auto_warnings:
+                        session_obj.warning_count = self.auto_warnings[session_id]
+                        
                     session_obj.updated_at = datetime.utcnow()
                     db_session.add(session_obj)
+                    
+                    if alerts:
+                        for alert in alerts:
+                            v = Violation(
+                                session_id=session_id,
+                                exam_id=session_obj.exam_id,
+                                student_id=session_obj.student_id,
+                                violation_type=alert.get("type", "unknown"),
+                                severity=ViolationSeverity(alert.get("severity", "medium")),
+                                message=alert.get("message", "Violation detected"),
+                                is_warning_issued=True
+                            )
+                            db_session.add(v)
+                            
                     await db_session.commit()
         except Exception as e:
             logger.error(f"Failed to save session update: {e}")
